@@ -10,9 +10,22 @@
 		BF50C0A030AE3EB800409202 /* ThreeDee.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThreeDee.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		BF50C0B030AE3EB900409202 /* Exceptions for "ThreeDee" folder in "ThreeDee" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = BF50C09F30AE3EB800409202 /* ThreeDee */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		BF50C0A230AE3EB800409202 /* ThreeDee */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				BF50C0B030AE3EB900409202 /* Exceptions for "ThreeDee" folder in "ThreeDee" target */,
+			);
 			path = ThreeDee;
 			sourceTree = "<group>";
 		};
@@ -185,7 +198,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
 			};
 			name = Debug;
 		};
@@ -256,6 +269,13 @@
 				DEVELOPMENT_TEAM = KTHB2V654S;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ThreeDee/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ThreeDee;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ThreeDee uses the front camera to follow your face so 3D models shift subtly with your viewing angle. Frames are analysed on-device and never stored.";
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -288,6 +308,13 @@
 				DEVELOPMENT_TEAM = KTHB2V654S;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ThreeDee/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ThreeDee;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ThreeDee uses the front camera to follow your face so 3D models shift subtly with your viewing angle. Frames are analysed on-device and never stored.";
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_UISupportsDocumentBrowser = NO;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
