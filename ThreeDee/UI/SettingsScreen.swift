@@ -16,11 +16,8 @@ struct SettingsScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            CapsLabel("Preferences")
-                            Text("Settings").font(Typography.display(32)).foregroundStyle(Palette.ink)
-                        }
+                    HStack {
+                        Text("Settings").font(Typography.display(32)).foregroundStyle(Palette.ink)
                         Spacer()
                         IconButton(systemName: "xmark", size: 36) { dismiss() }
                     }

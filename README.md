@@ -13,12 +13,12 @@ ThreeDee is an Internal iOS tool for opening, inspecting, converting and exporti
 - **Immersion** (*Immerse* button): step inside a model, which suits scanned rooms and Sketchfab spaces.
   - You stand at eye height (1.6 m) at true scale for anything room-sized, and follow floors, stairs and ramps. You never climb more than a step.
   - Small objects scale up around you; pinch to resize the world (scale chip; tap it to reset).
-  - One finger looks around and the world follows your finger. The joystick (bottom left) walks. Two fingers step sideways or rise. A game controller works too.
-  - Head tracking turns the screen into a window into the space: an off-axis projection driven by your head position.
+  - One finger looks around: the view turns the way you drag (right to look right, up to look up). The joystick (bottom left) walks. Two fingers move you the way they drag: sideways to step sideways, up or down to rise or crouch. A game controller works too.
+  - Head tracking turns the screen into a window into the space: an off-axis projection driven by your head position. It pans with sideways and up/down head movement only; leaning in or out doesn't zoom.
   - The model's own colours and textures are on by default.
 - **VR** (in immersion): split screen for phone headsets (Cardboard-style).
   - Each eye is rendered with its own frustum and pre-distorted for the lenses. Lens spacing and correction are in Settings.
-  - The IMU (Core Motion, gyro-predicted) drives the view. Hold the screen (or the headset button) to walk where you look; double-tap to return to the start point.
+  - The IMU (Core Motion, gyro-predicted) drives the view. Hold the screen (or the headset button) to walk where you look; double-tap to return to the start point. Walls are solid in VR: you slide along them instead of passing through.
 - **Inspector**: size, surface area, volume (watertight meshes), vertex/triangle counts, STEP header data. Per-file overrides for source unit and up axis.
 - **Convert / export** a single file or a batch selection. Results are written to *ThreeDee › Exports* and can be shared or saved to Files.
 - Two themes: **Paper** (cobalt on white) and **Blueprint** (white on cobalt).

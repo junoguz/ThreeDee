@@ -4,7 +4,7 @@
 //
 //  SwiftUI host for the Metal viewer. Gestures: one finger orbits, two fingers
 //  pan, pinch zooms, double tap re-frames. In immersion: one finger looks
-//  around (the world follows the finger), two fingers strafe / rise, pinch
+//  around (the view turns the way you drag), two fingers strafe / rise, pinch
 //  resizes the world, double tap returns to where you arrived; in VR, holding
 //  the screen (the headset's button) walks where you look.
 //

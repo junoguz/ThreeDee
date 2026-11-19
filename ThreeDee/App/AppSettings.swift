@@ -17,11 +17,11 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
         case .system: "System"
         }
     }
-    var colorScheme: ColorScheme? {
+    var interfaceStyle: UIUserInterfaceStyle {
         switch self {
         case .paper: .light
         case .blueprint: .dark
-        case .system: nil
+        case .system: .unspecified
         }
     }
 }

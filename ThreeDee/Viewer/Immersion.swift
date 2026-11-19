@@ -90,7 +90,9 @@ struct WalkCamera {
 
     static let eyeHeight: Float = 1.6
     static let stepHeight: Float = 0.5
-    static let walkSpeed: Float = 1.6
+    static let walkSpeed: Float = 4.0
+    /// How close (metres) the visitor's body gets to a wall in VR, where walls are solid.
+    static let bodyRadius: Float = 0.2
 
     var eye: SIMD3<Float> { feet + SIMD3(0, 0, (WalkCamera.eyeHeight + lift) * unitsPerMetre) }
 
@@ -174,8 +176,9 @@ enum HeadWindow {
 
 // MARK: - Ground
 
-/// Answers "what is under my feet?" for the walking camera. Meshes are indexed in a 2D grid of
-/// walkable (roughly horizontal) triangles; point clouds only get a floor estimate.
+/// Answers "what is under my feet?" and "is there a wall in the way?" for the walking camera. Meshes
+/// are indexed in a 2D grid twice: walkable (roughly horizontal) triangles and steep (wall-like)
+/// ones. Point clouds only get a floor estimate.
 nonisolated final class GroundIndex: Sendable {
     /// Height of the main floor (the largest horizontal surface in the lower half of the model).
     let floorHeight: Float
@@ -185,8 +188,12 @@ nonisolated final class GroundIndex: Sendable {
     private let nx: Int, ny: Int
     private let cellStart: [Int32]
     private let cellItems: [Int32]
+    private let wallStart: [Int32]
+    private let wallItems: [Int32]
     private let positions: [SIMD3<Float>]
     private let indices: [UInt32]
+
+    var hasWalls: Bool { !wallItems.isEmpty }
 
     init(mesh: Mesh, focus: BoundingBox) {
         let box = focus.isEmpty ? mesh.bounds() : focus
@@ -210,18 +217,20 @@ nonisolated final class GroundIndex: Sendable {
             var i = 0
             while i < mesh.positions.count { record(mesh.positions[i].z, 1); i += step }
             followsSurfaces = false
-            origin = .zero; cellSize = 1; nx = 0; ny = 0; cellStart = [0]; cellItems = []
+            origin = .zero; cellSize = 1; nx = 0; ny = 0; cellStart = [0]; cellItems = []; wallStart = [0]; wallItems = []
         } else {
             let triCount = mesh.indices.count / 3
-            var walkable: [Int32] = []
+            var walkable: [Int32] = [], walls: [Int32] = []
             walkable.reserveCapacity(triCount / 2)
+            walls.reserveCapacity(triCount / 2)
             for t in 0..<triCount {
                 let a: SIMD3<Float> = mesh.positions[Int(mesh.indices[t * 3])]
                 let b: SIMD3<Float> = mesh.positions[Int(mesh.indices[t * 3 + 1])]
                 let c: SIMD3<Float> = mesh.positions[Int(mesh.indices[t * 3 + 2])]
                 let n: SIMD3<Float> = simd_cross(b - a, c - a)
                 let len = simd_length(n)
-                guard len > 0, abs(n.z) / len >= 0.5 else { continue }
+                guard len > 0 else { continue }
+                guard abs(n.z) / len >= 0.5 else { walls.append(Int32(t)); continue }
                 walkable.append(Int32(t))
                 record((a.z + b.z + c.z) / 3, Double(len) * 0.5 * Double(abs(n.z) / len))
             }
@@ -232,7 +241,6 @@ nonisolated final class GroundIndex: Sendable {
             let gx = max(1, Int(ceil(extent.x / size))), gy = max(1, Int(ceil(extent.y / size)))
             let positions = mesh.positions, indices = mesh.indices
             let corner = SIMD2(box.min.x, box.min.y)
-            var counts = [Int32](repeating: 0, count: gx * gy + 1)
             func cellRange(_ t: Int32) -> (Int, Int, Int, Int)? {
                 let i = Int(t) * 3
                 let a: SIMD3<Float> = positions[Int(indices[i])]
@@ -244,28 +252,33 @@ nonisolated final class GroundIndex: Sendable {
                 let x1 = min(Int(hi.x.rounded(.down)), gx - 1), y1 = min(Int(hi.y.rounded(.down)), gy - 1)
                 return x0 <= x1 && y0 <= y1 ? (x0, x1, y0, y1) : nil
             }
-            for t in walkable {
-                guard let (x0, x1, y0, y1) = cellRange(t) else { continue }
-                for y in y0...y1 { for x in x0...x1 { counts[y * gx + x + 1] += 1 } }
-            }
-            for i in 0..<(gx * gy) { counts[i + 1] += counts[i] }
-            var fill = counts
-            var items = [Int32](repeating: 0, count: Int(counts[gx * gy]))
-            for t in walkable {
-                guard let (x0, x1, y0, y1) = cellRange(t) else { continue }
-                for y in y0...y1 {
-                    for x in x0...x1 {
-                        items[Int(fill[y * gx + x])] = t
-                        fill[y * gx + x] += 1
+            /// Compressed cell → triangles table (start offsets, items) for one triangle list.
+            func bucket(_ list: [Int32]) -> ([Int32], [Int32]) {
+                var counts = [Int32](repeating: 0, count: gx * gy + 1)
+                for t in list {
+                    guard let (x0, x1, y0, y1) = cellRange(t) else { continue }
+                    for y in y0...y1 { for x in x0...x1 { counts[y * gx + x + 1] += 1 } }
+                }
+                for i in 0..<(gx * gy) { counts[i + 1] += counts[i] }
+                var fill = counts
+                var items = [Int32](repeating: 0, count: Int(counts[gx * gy]))
+                for t in list {
+                    guard let (x0, x1, y0, y1) = cellRange(t) else { continue }
+                    for y in y0...y1 {
+                        for x in x0...x1 {
+                            items[Int(fill[y * gx + x])] = t
+                            fill[y * gx + x] += 1
+                        }
                     }
                 }
+                return (counts, items)
             }
             origin = corner
             cellSize = size
             nx = gx
             ny = gy
-            cellStart = counts
-            cellItems = items
+            (cellStart, cellItems) = bucket(walkable)
+            (wallStart, wallItems) = bucket(walls)
             followsSurfaces = !walkable.isEmpty
         }
         if let best = weight.indices.max(by: { weight[$0] < weight[$1] }), weight[best] > 0 {
@@ -312,6 +325,79 @@ nonisolated final class GroundIndex: Sendable {
     /// Where to stand when arriving at a floor-plan point: the surface nearest the main floor.
     func standingHeight(at p: SIMD2<Float>) -> Float {
         surfaces(at: p).min(by: { abs($0 - floorHeight) < abs($1 - floorHeight) }) ?? floorHeight
+    }
+
+    /// Pushes a standing body at floor-plan point `p` out of any wall it overlaps and returns where it
+    /// ends up. The body is a column of spheres of `radius` from `lowestZ` (above step height, so stairs
+    /// and kerbs stay walkable) up to the eyes.
+    ///
+    /// Walls are solid from the side their face looks towards. Approached from behind they let you
+    /// through, so a visitor who starts inside a closed object can still walk out of it.
+    func clearOfWalls(_ p: SIMD2<Float>, lowestZ: Float, eyeZ: Float, radius: Float) -> SIMD2<Float> {
+        guard hasWalls, radius > 0 else { return p }
+        // Sphere centres: eyes down to the hips (or the step height, whichever is higher).
+        let bottom = min(max(lowestZ, eyeZ - 4 * radius), eyeZ)
+        let count = min(max(Int(((eyeZ - bottom) / radius).rounded(.up)), 0), 6) + 1
+        let heights = (0..<count).map { i in count == 1 ? eyeZ : eyeZ - (eyeZ - bottom) * Float(i) / Float(count - 1) }
+        var p = p
+        for _ in 0..<4 {
+            let lo = (p - radius - origin) / cellSize, hi = (p + radius - origin) / cellSize
+            let x0 = max(Int(lo.x.rounded(.down)), 0), y0 = max(Int(lo.y.rounded(.down)), 0)
+            let x1 = min(Int(hi.x.rounded(.down)), nx - 1), y1 = min(Int(hi.y.rounded(.down)), ny - 1)
+            guard x0 <= x1, y0 <= y1 else { return p }
+            var seen = Set<Int32>()
+            var pushed = false
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    let cell = y * nx + x
+                    for k in Int(wallStart[cell])..<Int(wallStart[cell + 1]) {
+                        let t = wallItems[k]
+                        guard seen.insert(t).inserted else { continue }
+                        let i = Int(t) * 3
+                        let a = positions[Int(indices[i])], b = positions[Int(indices[i + 1])], c = positions[Int(indices[i + 2])]
+                        let n = simd_normalize(simd_cross(b - a, c - a))
+                        for z in heights {
+                            let centre = SIMD3(p.x, p.y, z)
+                            guard simd_dot(centre - a, n) >= 0 else { continue }
+                            let d = centre - GroundIndex.closestPoint(to: centre, a, b, c)
+                            let dist = simd_length(d)
+                            guard dist < radius else { continue }
+                            let flat = SIMD2(d.x, d.y)
+                            let flatLength = simd_length(flat)
+                            // Touching exactly on the face: back out along its normal.
+                            let away = flatLength > radius * 1e-4 ? flat / flatLength : simd_normalize(SIMD2(n.x, n.y))
+                            // Slide horizontally until the sphere only just touches.
+                            let clear = (radius * radius - d.z * d.z).squareRoot()
+                            p += away * (clear - flatLength + radius * 1e-3)
+                            pushed = true
+                        }
+                    }
+                }
+            }
+            if !pushed { break }
+        }
+        return p
+    }
+
+    /// Closest point on triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5).
+    static func closestPoint(to p: SIMD3<Float>, _ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>) -> SIMD3<Float> {
+        let ab = b - a, ac = c - a, ap = p - a
+        let d1 = simd_dot(ab, ap), d2 = simd_dot(ac, ap)
+        if d1 <= 0 && d2 <= 0 { return a }
+        let bp = p - b
+        let d3 = simd_dot(ab, bp), d4 = simd_dot(ac, bp)
+        if d3 >= 0 && d4 <= d3 { return b }
+        let vc = d1 * d4 - d3 * d2
+        if vc <= 0 && d1 >= 0 && d3 <= 0 { return a + ab * (d1 / (d1 - d3)) }
+        let cp = p - c
+        let d5 = simd_dot(ab, cp), d6 = simd_dot(ac, cp)
+        if d6 >= 0 && d5 <= d6 { return c }
+        let vb = d5 * d2 - d1 * d6
+        if vb <= 0 && d2 >= 0 && d6 <= 0 { return a + ac * (d2 / (d2 - d6)) }
+        let va = d3 * d6 - d5 * d4
+        if va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0 { return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))) }
+        let denom = 1 / (va + vb + vc)
+        return a + ab * (vb * denom) + ac * (vc * denom)
     }
 }
 

@@ -169,6 +169,8 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
     private var eyeMSAA: MTLTexture?
     private var eyeDepth: MTLTexture?
     private static let vrBackground = SIMD4<Float>(0.015, 0.03, 0.08, 1)
+    /// Grid and axis line thickness in drawable pixels (hardware lines are always 1).
+    private static let gridLineWidth: Float = 1.6
 
     init?(view: MTKView) {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
@@ -208,7 +210,7 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
               let flat = pipeline("meshVertex", "flatFragment", blended: true),
               let points = pipeline("meshVertex", "pointFragment", blended: false),
               let lines = pipeline("lineVertex", "lineFragment", blended: true),
-              let grid = pipeline("lineVertex", "gridFragment", blended: true),
+              let grid = pipeline("wideLineVertex", "gridFragment", blended: true),
               let distortion = pipeline("fullscreenVertex", "distortionFragment", blended: false) else { return nil }
         meshPipeline = mesh; flatPipeline = flat; pointPipeline = points; linePipeline = lines; gridPipeline = grid
         distortionPipeline = distortion
@@ -403,15 +405,14 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
 
     func pan(by delta: CGPoint) {
         if isImmersive {
-            // Two fingers: grab the world — drag sideways to strafe, drag down to rise.
+            // Two fingers: you move the way the fingers drag — sideways to step sideways, up to rise.
             walkAnimation = nil
-            let metresPerPoint: Float = 0.012
+            let metresPerPoint: Float = 0.015
             let h = walk.yaw
             let right = SIMD2(sin(h), -cos(h))
-            let side = -Float(delta.x) * metresPerPoint * walk.unitsPerMetre
-            walk.feet.x += right.x * side
-            walk.feet.y += right.y * side
-            walk.lift = min(max(walk.lift + Float(delta.y) * metresPerPoint, -WalkCamera.eyeHeight + 0.15), 200)
+            let side = Float(delta.x) * metresPerPoint * walk.unitsPerMetre
+            walkFeet(by: right * side)
+            walk.lift = min(max(walk.lift - Float(delta.y) * metresPerPoint, -WalkCamera.eyeHeight + 0.15), 200)
             return
         }
         cameraAnimation = nil
@@ -431,15 +432,15 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
         camera.zoom(by: Float(factor))
     }
 
-    /// One-finger drag in immersion: the world follows the finger (inverted rotation, scaled so the
-    /// point under the finger stays under it).
+    /// One-finger drag in immersion: the view turns the way the finger drags (drag right to look right,
+    /// drag up to look up), one field of view per screen height.
     private func turnHead(by points: SIMD2<Float>) {
         let radiansPerPoint = walk.fieldOfView / Float(max(view?.bounds.height ?? 600, 1))
         if isStereo && headMotion?.isAvailable == true {
-            vrYawOffset += points.x * radiansPerPoint
+            vrYawOffset -= points.x * radiansPerPoint
         } else {
-            walk.yaw += points.x * radiansPerPoint
-            walk.pitch = min(max(walk.pitch + points.y * radiansPerPoint, -1.45), 1.45)
+            walk.yaw -= points.x * radiansPerPoint
+            walk.pitch = min(max(walk.pitch - points.y * radiansPerPoint, -1.45), 1.45)
         }
     }
 
@@ -584,10 +585,11 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
                 headBaseline = base
                 let s = style.parallaxStrength
                 if isImmersive {
-                    // Immersion: the screen becomes a window; the head moves the eye behind it.
+                    // Immersion: the screen becomes a window; the head moves the eye behind it. Sideways and
+                    // up/down only (panning): leaning in or out never zooms.
                     let now3 = HeadWindow.headPosition(x: sample.x, y: sample.y, size: sample.z, aspect: pose.aspect)
                     let base3 = HeadWindow.headPosition(x: base.x, y: base.y, size: base.z, aspect: pose.aspect)
-                    targetHead = simd_clamp(now3 - base3, SIMD3(-0.15, -0.15, -0.2), SIMD3(0.15, 0.15, 0.25))
+                    targetHead = simd_clamp(now3 - base3, SIMD3(-0.15, -0.15, 0), SIMD3(0.15, 0.15, 0))
                     headDistance = base3.z
                 } else {
                     let dx = sample.x - base.x, dy = sample.y - base.y
@@ -683,9 +685,7 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
                 if abs(f.z) < 0.97 { heading = atan2(f.y, f.x) }
             }
             let forward = SIMD2(cos(heading), sin(heading)), right = SIMD2(sin(heading), -cos(heading))
-            let step = (forward * move.y + right * move.x) * WalkCamera.walkSpeed * walk.unitsPerMetre * dt
-            walk.feet.x += step.x
-            walk.feet.y += step.y
+            walkFeet(by: (forward * move.y + right * move.x) * WalkCamera.walkSpeed * walk.unitsPerMetre * dt)
         }
 
         // Follow floors, stairs and ramps; never climb more than a step.
@@ -700,6 +700,26 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
             let rate: Float = target > walk.feet.z ? 14 : 7
             walk.feet.z += (target - walk.feet.z) * (1 - exp(-dt * rate))
         }
+    }
+
+    /// Moves the visitor across the floor plan. In VR the body collides with walls instead of passing
+    /// through them; the move is split into sub-steps so a fast stride can't tunnel through a thin wall.
+    private func walkFeet(by delta: SIMD2<Float>) {
+        var p = SIMD2(walk.feet.x, walk.feet.y)
+        guard isStereo, let ground, ground.hasWalls else {
+            walk.feet.x = p.x + delta.x
+            walk.feet.y = p.y + delta.y
+            return
+        }
+        let radius = WalkCamera.bodyRadius * walk.unitsPerMetre
+        let steps = min(max(Int((simd_length(delta) / (radius * 0.5)).rounded(.up)), 1), 64)
+        let eyeZ = walk.eye.z
+        let lowestZ = walk.feet.z + (WalkCamera.stepHeight * walk.unitsPerMetre) + radius
+        for _ in 0..<steps {
+            p = ground.clearOfWalls(p + delta / Float(steps), lowestZ: lowestZ, eyeZ: eyeZ, radius: radius)
+        }
+        walk.feet.x = p.x
+        walk.feet.y = p.y
     }
 
     private static func ease(_ t: Float) -> Float {
@@ -997,16 +1017,18 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
             }
         }
 
-        // Grid and axes, occluded by the model.
+        // Grid and axes, occluded by the model. Drawn as quads so they can be thicker than one pixel.
         encoder.setDepthStencilState(depthRead)
+        var lineWidth = SIMD4<Float>(ViewerRenderer.gridLineWidth, rv.viewportWidth, rv.viewportHeight, 0)
         if style.showGrid, let gridBuffer, gridVertexCount > 0 {
             var gu = u
             gu.lineColor = SIMD4(ink, style.blueprint ? 0.55 : 0.6)
             encoder.setRenderPipelineState(gridPipeline)
             encoder.setVertexBuffer(gridBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&gu, length: MemoryLayout<ViewerUniforms>.stride, index: 3)
+            encoder.setVertexBytes(&lineWidth, length: MemoryLayout<SIMD4<Float>>.stride, index: 7)
             encoder.setFragmentBytes(&gu, length: MemoryLayout<ViewerUniforms>.stride, index: 3)
-            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: gridVertexCount / 2)
         }
         if style.showAxes, let axisBuffer, axisVertexCount > 0 {
             var au = u
@@ -1014,8 +1036,9 @@ final class ViewerRenderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(gridPipeline)
             encoder.setVertexBuffer(axisBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&au, length: MemoryLayout<ViewerUniforms>.stride, index: 3)
+            encoder.setVertexBytes(&lineWidth, length: MemoryLayout<SIMD4<Float>>.stride, index: 7)
             encoder.setFragmentBytes(&au, length: MemoryLayout<ViewerUniforms>.stride, index: 3)
-            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: axisVertexCount)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: axisVertexCount / 2)
         }
 
         if splatCount > 0, let positionBuffer, let colorBuffer, let splatShapeBuffer, let splatOrder {

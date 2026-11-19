@@ -18,9 +18,36 @@ struct ThreeDeeApp: App {
             RootView()
                 .environment(settings)
                 .environment(store)
-                .preferredColorScheme(settings.appearance.colorScheme)
+                .background(WindowTheme(style: settings.appearance.interfaceStyle))
                 .tint(Palette.ink)
                 .fontDesign(.rounded)
+        }
+    }
+}
+
+/// Applies the chosen theme to the whole window, so everything presented in it follows a change
+/// immediately, including a sheet that is open at the time (Settings). SwiftUI's
+/// `preferredColorScheme` leaves an open sheet on the scheme it was presented with and can't
+/// return it to System.
+private struct WindowTheme: UIViewRepresentable {
+    let style: UIUserInterfaceStyle
+
+    func makeUIView(context: Context) -> ThemeView {
+        let view = ThemeView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: ThemeView, context: Context) { view.style = style }
+
+    final class ThemeView: UIView {
+        var style: UIUserInterfaceStyle = .unspecified { didSet { apply() } }
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+        }
+        private func apply() {
+            if let window, window.overrideUserInterfaceStyle != style { window.overrideUserInterfaceStyle = style }
         }
     }
 }

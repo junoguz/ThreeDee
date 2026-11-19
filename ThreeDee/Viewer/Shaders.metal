@@ -228,6 +228,44 @@ vertex LineOut lineVertex(uint vid [[vertex_id]],
     return out;
 }
 
+/// Grid and axis lines with real thickness: each segment (one instance) becomes a screen-space quad
+/// `width.x` pixels wide in a viewport of `width.yz` pixels. Segments are clipped to the near plane
+/// first so lines that pass behind the eye (inside a model) still draw correctly.
+vertex LineOut wideLineVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                              const device float4 *vertices [[buffer(0)]],
+                              constant Uniforms &u [[buffer(3)]],
+                              constant float4 &width [[buffer(7)]]) {
+    LineOut out;
+    float4 va = vertices[iid * 2], vb = vertices[iid * 2 + 1];
+    float4 a = u.viewProjection * float4(va.xyz, 1.0);
+    float4 b = u.viewProjection * float4(vb.xyz, 1.0);
+    // Near plane is clip z = 0 (Metal depth 0…1).
+    if (a.z < 0.0 && b.z < 0.0) {
+        out.position = float4(2.0, 2.0, 2.0, 1.0);   // fully behind: degenerate, nothing drawn
+        out.alpha = 0.0;
+        out.planar = va.xy;
+        return out;
+    }
+    float ta = 0.0, tb = 1.0;
+    if (a.z < 0.0) { ta = a.z / (a.z - b.z); }
+    if (b.z < 0.0) { tb = 1.0 - b.z / (b.z - a.z); }
+    float4 ca = mix(a, b, ta), cb = mix(a, b, tb);
+    float2 half_viewport = max(width.yz * 0.5, float2(1.0));
+    float2 sa = ca.xy / ca.w * half_viewport, sb = cb.xy / cb.w * half_viewport;
+    float2 dir = sb - sa;
+    float len = length(dir);
+    float2 normal = len > 1e-5 ? float2(-dir.y, dir.x) / len : float2(0.0, 1.0);
+    bool endB = vid >= 2;
+    float side = (vid & 1) ? 1.0 : -1.0;
+    float4 p = endB ? cb : ca;
+    p.xy += normal * side * (width.x * 0.5) / half_viewport * p.w;
+    out.position = p;
+    out.position.z -= u.params.w * out.position.w;
+    out.alpha = va.w;
+    out.planar = mix(va.xy, vb.xy, endB ? tb : ta);
+    return out;
+}
+
 fragment float4 lineFragment(LineOut in [[stage_in]], constant Uniforms &u [[buffer(3)]]) {
     return float4(u.lineColor.rgb, u.lineColor.a * in.alpha);
 }
