@@ -18,6 +18,8 @@ nonisolated final class FaceTracker: NSObject, AVCaptureVideoDataOutputSampleBuf
         var y: Float = 0.5
         /// Face width relative to the frame width; grows as the face approaches.
         var size: Float = 0
+        /// Frame height / width of the analysed (upright) image.
+        var aspect: Float = 4.0 / 3.0
         var timestamp: CFTimeInterval = 0
         var valid = false
     }
@@ -63,7 +65,7 @@ nonisolated final class FaceTracker: NSObject, AVCaptureVideoDataOutputSampleBuf
             let move = Float(min(max((t - 5) / 1.0, 0), 1))
             lock.withLock {
                 self.latest = Pose(x: 0.5 - 0.18 * move, y: 0.5 + 0.12 * move, size: 0.3 * (1 + 0.25 * move),
-                              timestamp: CACurrentMediaTime(), valid: true)
+                              aspect: 4.0 / 3.0, timestamp: CACurrentMediaTime(), valid: true)
             }
             report(.tracking)
         }
@@ -195,8 +197,9 @@ nonisolated final class FaceTracker: NSObject, AVCaptureVideoDataOutputSampleBuf
         }
         lastSeen = now
         let box = face.boundingBox
+        let aspect = Float(CVPixelBufferGetHeight(pixelBuffer)) / Float(max(CVPixelBufferGetWidth(pixelBuffer), 1))
         lock.withLock {
-            latest = Pose(x: Float(box.midX), y: Float(box.midY), size: Float(box.width), timestamp: now, valid: true)
+            latest = Pose(x: Float(box.midX), y: Float(box.midY), size: Float(box.width), aspect: aspect, timestamp: now, valid: true)
         }
         report(.tracking)
     }

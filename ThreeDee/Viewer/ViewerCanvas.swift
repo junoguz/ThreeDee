@@ -3,7 +3,10 @@
 //  ThreeDee
 //
 //  SwiftUI host for the Metal viewer. Gestures: one finger orbits, two fingers
-//  pan, pinch zooms, double tap re-frames.
+//  pan, pinch zooms, double tap re-frames. In immersion: one finger looks
+//  around (the world follows the finger), two fingers strafe / rise, pinch
+//  resizes the world, double tap returns to where you arrived; in VR, holding
+//  the screen (the headset's button) walks where you look.
 //
 
 import MetalKit
@@ -16,11 +19,43 @@ import UIKit
 final class ViewerController {
     @ObservationIgnored weak var renderer: ViewerRenderer?
     @ObservationIgnored private var tracker: FaceTracker?
+    @ObservationIgnored private let motion = HeadMotion()
     private(set) var headStatus: FaceTracker.Status = .idle
+    private(set) var isImmersive = false
+    private(set) var isVR = false
+    private(set) var immersion = ImmersionStatus()
+
+    var motionAvailable: Bool { motion.isAvailable }
 
     func resetView() { renderer?.resetView(animated: true) }
 
     func look(_ preset: ViewPreset) { renderer?.look(yaw: preset.yaw, pitch: preset.pitch) }
+
+    // MARK: Immersion
+
+    func enterImmersion() {
+        guard let renderer, !isImmersive else { return }
+        renderer.enterImmersion()
+        isImmersive = renderer.isImmersive
+    }
+
+    func exitImmersion() {
+        setVR(false)
+        renderer?.exitImmersion()
+        isImmersive = false
+    }
+
+    func setVR(_ on: Bool) {
+        guard on != isVR, !on || isImmersive else { return }
+        renderer?.headMotion = motion
+        renderer?.setStereo(on)
+        isVR = renderer?.isStereo ?? false
+    }
+
+    /// Joystick deflection: x strafes right, y walks forward (−1…1).
+    func setMove(_ v: SIMD2<Float>) { renderer?.moveInput = v }
+
+    func resetWorldScale() { renderer?.resetWorldScale() }
 
     func setHeadTracking(_ enabled: Bool) {
         if enabled {
@@ -44,9 +79,17 @@ final class ViewerController {
     func attach(_ renderer: ViewerRenderer) {
         self.renderer = renderer
         renderer.faceTracker = tracker
+        renderer.headMotion = motion
+        renderer.onImmersionChange = { [weak self] status in
+            guard let self, self.immersion != status else { return }
+            self.immersion = status
+        }
     }
 
-    deinit { tracker?.stop() }
+    deinit {
+        tracker?.stop()
+        motion.stop()
+    }
 }
 
 enum ViewPreset: String, CaseIterable, Identifiable {
@@ -137,7 +180,15 @@ struct ViewerCanvas: UIViewRepresentable {
         }
 
         @objc private func handleTouchDown(_ g: UILongPressGestureRecognizer) {
-            if g.state == .began { renderer?.stopInertia() }
+            switch g.state {
+            case .began:
+                renderer?.stopInertia()
+                renderer?.touchHeld = true
+            case .ended, .cancelled, .failed:
+                renderer?.touchHeld = false
+            default:
+                break
+            }
         }
 
         @objc private func handleRotate(_ g: UIPanGestureRecognizer) {

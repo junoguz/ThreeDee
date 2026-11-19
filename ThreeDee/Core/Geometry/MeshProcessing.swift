@@ -159,6 +159,8 @@ nonisolated enum MeshProcessing {
         var outPositions: [SIMD3<Float>] = []
         var outNormals: [SIMD3<Float>] = []
         var outColors: [RGBA8] = []
+        var outUVs: [SIMD2<Float>] = []
+        let hasUV = mesh.hasTexCoords
         var outIndices = [UInt32](repeating: 0, count: mesh.indices.count)
         outPositions.reserveCapacity(weld.unique + weld.unique / 4)
         outNormals.reserveCapacity(weld.unique + weld.unique / 4)
@@ -184,11 +186,14 @@ nonisolated enum MeshProcessing {
                 }
                 let len = simd_length(n)
                 n = len > 0 ? n / len : ft
-                // Reuse an existing output vertex with (nearly) the same normal.
+                // Reuse an existing output vertex with (nearly) the same normal — and the same texture
+                // coordinate, so UV seams survive even though shading is smoothed across them.
                 var found: Int32 = -1
                 var cursor = firstOut[v]
                 while cursor >= 0 {
-                    if simd_dot(outNormals[Int(cursor)], n) > 0.9999 { found = cursor; break }
+                    if simd_dot(outNormals[Int(cursor)], n) > 0.9999 && (!hasUV || outUVs[Int(cursor)] == mesh.texCoords[original]) {
+                        found = cursor; break
+                    }
                     cursor = nextOut[Int(cursor)]
                 }
                 if found < 0 {
@@ -196,13 +201,18 @@ nonisolated enum MeshProcessing {
                     outPositions.append(mesh.positions[original])
                     outNormals.append(n)
                     if mesh.hasColors { outColors.append(mesh.colors[original]) }
+                    if hasUV { outUVs.append(mesh.texCoords[original]) }
                     nextOut.append(firstOut[v])
                     firstOut[v] = found
                 }
                 outIndices[t * 3 + k] = UInt32(found)
             }
         }
-        return Mesh(positions: outPositions, normals: outNormals, colors: outColors, indices: outIndices)
+        var result = Mesh(positions: outPositions, normals: outNormals, colors: outColors, indices: outIndices, texCoords: outUVs)
+        result.materials = mesh.materials
+        result.textures = mesh.textures
+        result.triangleMaterials = mesh.triangleMaterials
+        return result
     }
 
     /// Line segments (pairs of points) along boundaries and edges sharper than `angle`.
@@ -233,6 +243,13 @@ nonisolated enum MeshProcessing {
     }
 }
 
+/// A run of the (material-sorted) index buffer that shares one material.
+nonisolated struct MaterialRange: Sendable {
+    var indexStart: Int
+    var indexCount: Int
+    var material: Int
+}
+
 /// Everything the viewer needs, computed once off the main thread.
 nonisolated struct PreparedMesh: Sendable {
     /// Identity for change detection in the UI.
@@ -240,13 +257,25 @@ nonisolated struct PreparedMesh: Sendable {
     var mesh: Mesh
     var edgeLines: [SIMD3<Float>]
     var bounds: BoundingBox
+    /// Bounds of the bulk of the content, ignoring stray far-away points (scans and splats often
+    /// carry a few). Used for framing, the grid and immersion; `bounds` stays the true extent.
+    var focusBounds: BoundingBox
     var statistics: MeshStatistics
+    /// Draw ranges grouped by material; empty when the mesh has none.
+    var materialRanges: [MaterialRange] = []
 
     static func prepare(_ source: Mesh) -> PreparedMesh {
         var mesh = source
         mesh.sanitize()
         if mesh.isPointCloud {
-            return PreparedMesh(mesh: mesh, edgeLines: [], bounds: mesh.bounds(),
+            let bounds = mesh.bounds()
+            var focus = robustBounds(mesh.positions, fallback: bounds)
+            if mesh.hasSplats {
+                // Splat captures wrap the scene in large, faint background splats: frame the solid ones.
+                let solid = zip(mesh.positions, mesh.colors).compactMap { $1.a >= 26 ? $0 : nil }
+                focus = robustBounds(solid, fallback: bounds, trim: 0.01)
+            }
+            return PreparedMesh(mesh: mesh, edgeLines: [], bounds: bounds, focusBounds: focus,
                                 statistics: MeshStatistics(surfaceArea: 0, volume: 0, isClosed: false, boundaryEdges: 0))
         }
         let topology = MeshTopology(mesh: mesh)
@@ -255,6 +284,63 @@ nonisolated struct PreparedMesh: Sendable {
         if !mesh.hasNormals || mesh.normals.contains(where: { $0 == .zero }) {
             mesh = MeshProcessing.withCreaseNormals(mesh)
         }
-        return PreparedMesh(mesh: mesh, edgeLines: edges, bounds: mesh.bounds(), statistics: stats)
+        let ranges = sortByMaterial(&mesh)
+        let bounds = mesh.bounds()
+        return PreparedMesh(mesh: mesh, edgeLines: edges, bounds: bounds, focusBounds: bounds, statistics: stats,
+                            materialRanges: ranges)
+    }
+
+    /// Reorders triangles so each material is one contiguous draw (stable counting sort).
+    private static func sortByMaterial(_ mesh: inout Mesh) -> [MaterialRange] {
+        guard mesh.hasMaterials else { return [] }
+        let materialCount = mesh.materials.count
+        var counts = [Int](repeating: 0, count: materialCount + 1)
+        for m in mesh.triangleMaterials { counts[min(Int(m), materialCount - 1) + 1] += 1 }
+        for i in 0..<materialCount { counts[i + 1] += counts[i] }
+        var ranges: [MaterialRange] = []
+        for m in 0..<materialCount where counts[m + 1] > counts[m] {
+            ranges.append(MaterialRange(indexStart: counts[m] * 3, indexCount: (counts[m + 1] - counts[m]) * 3, material: m))
+        }
+        if ranges.count == 1 && ranges[0].indexStart == 0 { return ranges }
+        var cursor = counts
+        var sorted = [UInt32](repeating: 0, count: mesh.indices.count)
+        var sortedMaterials = [UInt16](repeating: 0, count: mesh.triangleMaterials.count)
+        for (t, m) in mesh.triangleMaterials.enumerated() {
+            let slot = min(Int(m), materialCount - 1)
+            let dst = cursor[slot]
+            cursor[slot] += 1
+            sorted[dst * 3] = mesh.indices[t * 3]
+            sorted[dst * 3 + 1] = mesh.indices[t * 3 + 1]
+            sorted[dst * 3 + 2] = mesh.indices[t * 3 + 2]
+            sortedMaterials[dst] = UInt16(slot)
+        }
+        mesh.indices = sorted
+        mesh.triangleMaterials = sortedMaterials
+        return ranges
+    }
+
+    /// Per-axis `trim`…(1 − `trim`) range of a (sub-sampled) point set, padded slightly.
+    static func robustBounds(_ points: [SIMD3<Float>], fallback: BoundingBox, trim: Double = 0.005) -> BoundingBox {
+        guard points.count > 1000 else { return fallback }
+        let step = max(1, points.count / 200_000)
+        var xs: [Float] = [], ys: [Float] = [], zs: [Float] = []
+        xs.reserveCapacity(points.count / step + 1); ys.reserveCapacity(xs.capacity); zs.reserveCapacity(xs.capacity)
+        var i = 0
+        while i < points.count {
+            let p = points[i]
+            if p.x.isFinite && p.y.isFinite && p.z.isFinite { xs.append(p.x); ys.append(p.y); zs.append(p.z) }
+            i += step
+        }
+        guard xs.count > 100 else { return fallback }
+        xs.sort(); ys.sort(); zs.sort()
+        let lo = Int(Double(xs.count - 1) * trim), hi = Int(Double(xs.count - 1) * (1 - trim))
+        var box = BoundingBox(min: SIMD3(xs[lo], ys[lo], zs[lo]), max: SIMD3(xs[hi], ys[hi], zs[hi]))
+        let pad = box.size * 0.03
+        box.min -= pad
+        box.max += pad
+        // Only tighten: never report more than the true extent.
+        box.min = simd_max(box.min, fallback.min)
+        box.max = simd_min(box.max, fallback.max)
+        return box.isEmpty ? fallback : box
     }
 }

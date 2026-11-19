@@ -61,6 +61,9 @@ nonisolated enum STLImporter {
 // MARK: - PLY
 
 nonisolated enum PLYImporter {
+    /// Splats less opaque than this contribute nothing visible and are skipped.
+    static let splatOpacityCutoff = 0.01
+
     private enum Encoding { case ascii, binaryLE, binaryBE }
 
     private enum ScalarType {
@@ -149,6 +152,10 @@ nonisolated enum PLYImporter {
         var normals: [SIMD3<Float>] = []
         var colors: [RGBA8] = []
         var indices: [UInt32] = []
+        var radii: [Float] = []
+        var splats: [SplatShape] = []
+        // Gaussian-splat files are pure point sets, so dropping near-transparent splats can't break faces.
+        let hasFaces = elements.contains { $0.name == "face" && $0.count > 0 }
 
         // Reads one scalar value at a byte offset for binary encodings.
         func readBinary(_ raw: UnsafeRawBufferPointer, _ offset: Int, _ type: ScalarType, _ big: Bool) -> Double {
@@ -199,6 +206,14 @@ nonisolated enum PLYImporter {
                 ?? props.firstIndex { $0.listCountType != nil }
             let hasNormals = isVertex && inx != nil && iny != nil && inz != nil
             let hasColors = isVertex && ir != nil && ig != nil && ib != nil
+            // 3D Gaussian splatting: colour is the SH DC term, opacity a logit, scales are log-sigmas.
+            let idc = [index(["f_dc_0"]), index(["f_dc_1"]), index(["f_dc_2"])]
+            let isSplat = isVertex && !hasColors && idc.allSatisfy { $0 != nil }
+            let iop = isSplat && !hasFaces ? index(["opacity"]) : nil
+            let iscale = [index(["scale_0"]), index(["scale_1"]), index(["scale_2"])]
+            let hasScale = isSplat && iscale.allSatisfy { $0 != nil }
+            let irot = [index(["rot_0"]), index(["rot_1"]), index(["rot_2"]), index(["rot_3"])]
+            let hasShape = hasScale && irot.allSatisfy { $0 != nil }
             if isVertex {
                 positions.reserveCapacity(element.count)
                 if hasNormals { normals.reserveCapacity(element.count) }
@@ -246,7 +261,26 @@ nonisolated enum PLYImporter {
                 }
 
                 if isVertex, let ix, let iy, let iz {
+                    let opacity = iop.map { 1 / (1 + exp(-values[$0])) } ?? 1
+                    if opacity < PLYImporter.splatOpacityCutoff { continue }
                     positions.append(SIMD3(Float(values[ix]), Float(values[iy]), Float(values[iz])))
+                    if isSplat {
+                        let c0 = 0.28209479177387814
+                        colors.append(RGBA8(unit: 0.5 + c0 * values[idc[0]!], 0.5 + c0 * values[idc[1]!], 0.5 + c0 * values[idc[2]!], opacity))
+                    }
+                    if hasScale {
+                        let sigma = SIMD3(Float(exp(values[iscale[0]!])), Float(exp(values[iscale[1]!])), Float(exp(values[iscale[2]!])))
+                        let sg = [sigma.x, sigma.y, sigma.z].sorted()
+                        // Disc radius covering ~1.5σ of the splat's two largest axes (point-style fallback).
+                        radii.append(1.5 * (sg[1] * sg[2]).squareRoot())
+                        if hasShape {
+                            // rot_0…3 = (w, x, y, z)
+                            let q = simd_quatf(ix: Float(values[irot[1]!]), iy: Float(values[irot[2]!]), iz: Float(values[irot[3]!]),
+                                               r: Float(values[irot[0]!]))
+                            let n = simd_length(q.vector)
+                            splats.append(SplatShape(sigma: sigma, rotation: n > 0 ? simd_quatf(vector: q.vector / n) : simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)))
+                        }
+                    }
                     if hasNormals { normals.append(SIMD3(Float(values[inx!]), Float(values[iny!]), Float(values[inz!]))) }
                     if hasColors {
                         let r = values[ir!] * colorScale(props[ir!].type)
@@ -267,7 +301,8 @@ nonisolated enum PLYImporter {
             }
         }
         guard !positions.isEmpty else { throw ImportError.empty }
-        var mesh = Mesh(positions: positions, normals: normals, colors: colors, indices: indices)
+        var mesh = Mesh(positions: positions, normals: normals, colors: colors, indices: indices, pointRadii: indices.isEmpty ? radii : [])
+        if indices.isEmpty && splats.count == positions.count { mesh.splats = splats }
         mesh.sanitize()
         // Scanner output often carries zero normals; treat them as absent.
         if mesh.hasNormals && !mesh.isPointCloud && mesh.normals.allSatisfy({ $0 == .zero }) { mesh.normals = [] }

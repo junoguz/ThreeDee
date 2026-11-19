@@ -77,6 +77,27 @@ struct SettingsScreen: View {
                         }
                     }
 
+                    section("Immersion & VR headset") {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "visionpro").foregroundStyle(Palette.ink)
+                            Text("Immersion puts you inside a model at true human scale. VR splits the screen for phone headsets (Cardboard-style) and follows your head with the motion sensors.")
+                                .font(Typography.body(13)).foregroundStyle(Palette.inkSecondary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(16)
+                        divider
+                        item("Lens spacing", "Distance between your headset's lens centres. Match it to your eyes if the image looks doubled.") {
+                            HStack(spacing: 12) {
+                                Slider(value: $s.vrLensSpacing, in: 55...75, step: 0.5).tint(Palette.ink)
+                                Text(String(format: "%.1f mm", settings.vrLensSpacing))
+                                    .font(Typography.mono(12)).foregroundStyle(Palette.ink)
+                                    .frame(width: 64, alignment: .trailing)
+                            }
+                        }
+                        divider
+                        toggle("Lens correction", "Pre-distorts each eye's image so straight lines stay straight through the lenses. Turn off for viewers without lenses.", $s.vrDistortion)
+                    }
+
                     section("Appearance") {
                         item("Theme", "Paper is cobalt on white; Blueprint inverts it.") {
                             PillPicker(options: AppearanceMode.allCases.map { ($0, $0.title) }, selection: $s.appearance)

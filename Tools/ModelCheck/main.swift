@@ -40,6 +40,15 @@ for path in files {
                  model.mesh.isPointCloud ? "point cloud" : (prepared.statistics.isClosed ? "watertight" : "\(prepared.statistics.boundaryEdges) open edges"),
                  Date().timeIntervalSince(start)))
     for detail in model.details { print("    \(detail.label): \(detail.value)") }
+    let m = model.mesh
+    if m.hasAppearance || m.hasPointRadii {
+        let textured = m.materials.filter { $0.baseColorTexture != nil }.count
+        print("    appearance: \(m.hasColors ? "vertex colours" : "no vertex colours"), \(m.materials.count) materials (\(textured) textured), \(m.textures.count) textures, UVs \(m.hasTexCoords ? "yes" : "no")\(m.hasPointRadii ? ", splat radii" : "")")
+    }
+    if prepared.focusBounds != prepared.bounds {
+        let f = prepared.focusBounds.size
+        print(String(format: "    focus bounds %.1f × %.1f × %.1f mm (stray points ignored)", f.x, f.y, f.z))
+    }
 
     for format in ExportFormat.allCases {
         if model.mesh.isPointCloud && !format.supportsPointClouds { continue }

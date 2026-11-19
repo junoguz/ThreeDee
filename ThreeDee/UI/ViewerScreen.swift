@@ -70,6 +70,8 @@ struct ViewerScreen: View {
     @State private var showInfo = false
     @State private var showExport = false
     @State private var originalColors = false
+    /// Inside a model, show its own colours by default.
+    @State private var immersionColors = true
     @State private var showPresets = false
 
     init(item: LibraryItem) {
@@ -80,17 +82,26 @@ struct ViewerScreen: View {
     private var current: LibraryItem { store.item(named: item.fileName) ?? item }
 
     /// Physical objects outside ~1 mm…20 m usually mean the file's unit was misread.
+    /// Spaces (scanned rooms, buildings) legitimately exceed 20 m when the file declares its unit.
     private var scaleLooksOff: Bool {
         guard item.format != .step, model.phase == .ready, current.metadata?.unitOverride == nil,
-              let size = model.prepared?.bounds.size else { return false }
+              let size = model.prepared?.focusBounds.size else { return false }
         let largest = max(size.x, size.y, size.z)
-        return largest > 0 && (largest < 1 || largest > 20_000)
+        let ceiling: Float = model.imported?.unitIsDeclared == true ? 2_000_000 : 20_000
+        return largest > 0 && (largest < 1 || largest > ceiling)
     }
 
+    private var hasAppearance: Bool { model.prepared?.mesh.hasAppearance == true }
+
     private var style: ViewerStyle {
-        ViewerStyle(renderStyle: settings.renderStyle, originalColors: originalColors, showGrid: settings.showGrid,
-                    showAxes: settings.showAxes, gridUnit: settings.gridUnit, blueprint: colorScheme == .dark,
-                    parallaxEnabled: settings.parallaxEnabled, parallaxStrength: Float(settings.parallaxStrength))
+        // Inside a model: solid surfaces in the file's own colours, no drafting overlays.
+        let immersive = controller.isImmersive
+        return ViewerStyle(renderStyle: immersive ? .solid : settings.renderStyle,
+                           originalColors: immersive ? immersionColors : originalColors,
+                           showGrid: settings.showGrid && !immersive, showAxes: settings.showAxes && !immersive,
+                           gridUnit: settings.gridUnit, blueprint: colorScheme == .dark,
+                           parallaxEnabled: settings.parallaxEnabled, parallaxStrength: Float(settings.parallaxStrength),
+                           headset: settings.headsetProfile)
     }
 
     var body: some View {
@@ -100,15 +111,24 @@ struct ViewerScreen: View {
                 .ignoresSafeArea()
                 .opacity(model.phase == .ready ? 1 : 0)
                 .animation(.easeOut(duration: 0.35), value: model.phase == .ready)
-            chrome
+            if controller.isImmersive {
+                ImmersionHUD(controller: controller, parallaxEnabled: settings.parallaxEnabled, hasAppearance: hasAppearance,
+                             colors: $immersionColors) { settings.parallaxEnabled.toggle() }
+                    .transition(.opacity)
+            } else {
+                chrome
+                    .transition(.opacity)
+            }
             switch model.phase {
             case .loading(let progress): LoadingOverlay(name: item.displayName, format: item.format, progress: progress)
             case .failed(let message): FailureView(message: message) { dismiss() }
             case .ready: EmptyView()
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: controller.isImmersive)
         .toolbar(.hidden, for: .navigationBar)
-        .statusBarHidden(false)
+        .statusBarHidden(controller.isImmersive)
+        .persistentSystemOverlays(controller.isImmersive ? .hidden : .automatic)
         .onAppear {
             model.load(current, options: store.options(for: current, settings: settings), store: store, settings: settings)
             controller.setHeadTracking(settings.parallaxEnabled)
@@ -121,10 +141,35 @@ struct ViewerScreen: View {
                 }
             }
             if args.contains("-presets") { showPresets = true }
+            if args.contains("-colors") { originalColors = true }
             #endif
         }
-        .onDisappear { controller.setHeadTracking(false) }
-        .onChange(of: settings.parallaxEnabled) { _, on in controller.setHeadTracking(on) }
+        .onDisappear {
+            controller.exitImmersion()
+            controller.setHeadTracking(false)
+            UIApplication.shared.isIdleTimerDisabled = false
+            OrientationLock.set(nil)
+        }
+        .onChange(of: settings.parallaxEnabled) { _, on in controller.setHeadTracking(on && !controller.isVR) }
+        .onChange(of: controller.isImmersive) { _, on in
+            // Don't let the screen sleep while you're walking around (or wearing the phone).
+            UIApplication.shared.isIdleTimerDisabled = on
+        }
+        .onChange(of: controller.isVR) { _, vr in
+            // Headsets hold the phone in landscape; the front camera can't see a face in there.
+            OrientationLock.set(vr ? .landscape : nil)
+            controller.setHeadTracking(settings.parallaxEnabled && !vr)
+        }
+        #if DEBUG
+        .onChange(of: model.phase) { _, phase in
+            let args = ProcessInfo.processInfo.arguments
+            guard phase == .ready, args.contains("-immerse") || args.contains("-vr") else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                controller.enterImmersion()
+                if args.contains("-vr") { DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { controller.setVR(true) } }
+            }
+        }
+        #endif
         .onChange(of: store.options(for: current, settings: settings)) { _, options in
             model.load(current, options: options, store: store, settings: settings)
         }
@@ -211,7 +256,19 @@ struct ViewerScreen: View {
             HStack(alignment: .bottom) {
                 MeasureReadout(prepared: model.prepared, grid: settings.gridUnit, showGrid: settings.showGrid)
                 Spacer()
-                VStack(spacing: 8) {
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button { controller.enterImmersion() } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "figure.walk").font(.system(size: 13, weight: .semibold))
+                            Text("IMMERSE").font(Typography.mono(11, weight: .bold))
+                        }
+                        .foregroundStyle(Palette.onInk)
+                        .padding(.horizontal, 13)
+                        .frame(height: 40)
+                        .background(Capsule().fill(Palette.ink))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Immerse: stand inside the model")
                     if showPresets {
                         ForEach(ViewPreset.allCases) { preset in
                             Button(preset.title) { controller.look(preset) }
@@ -243,19 +300,8 @@ struct ViewerScreen: View {
                     @Bindable var s = settings
                     PillPicker(options: RenderStyle.allCases.map { ($0, $0.title) }, selection: $s.renderStyle, compact: true)
                 }
-                if model.prepared?.mesh.hasColors == true {
-                    Button {
-                        originalColors.toggle()
-                    } label: {
-                        Image(systemName: originalColors ? "paintpalette.fill" : "paintpalette")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(originalColors ? Palette.onInk : Palette.ink)
-                            .frame(width: 40, height: 40)
-                            .background(Circle().fill(originalColors ? Palette.ink : Palette.paper))
-                            .overlay(Circle().strokeBorder(Palette.hairline))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Show original colours")
+                if hasAppearance {
+                    ColorToggle(on: $originalColors)
                 }
             }
         }
@@ -315,7 +361,8 @@ struct MeasureReadout: View {
 
     var body: some View {
         let size = prepared?.bounds.size ?? .zero
-        let spec = prepared.map { GridSpec.make(for: $0.bounds, unit: grid) }
+        // Same box the viewer draws its grid around.
+        let spec = prepared.map { GridSpec.make(for: $0.focusBounds, unit: grid) }
         VStack(alignment: .leading, spacing: 6) {
             if showGrid, let spec {
                 HStack(spacing: 10) {

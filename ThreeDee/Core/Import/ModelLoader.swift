@@ -70,6 +70,10 @@ nonisolated enum ModelLoader {
             raw = try ModelIOImporter.load(url)
         }
 
+        // Gaussian-splat captures (LiDAR / photogrammetry apps) are written in metres.
+        let isSplat = format == .ply && raw.isPointCloud && raw.hasPointRadii
+        if isSplat { details.append(.init(label: "Content", value: raw.hasSplats ? "3D Gaussian splats" : "Gaussian splats, shown as discs")) }
+
         let unit: LengthUnit
         let isDeclared: Bool
         if format != .step, let override = options.unitOverride {
@@ -78,6 +82,9 @@ nonisolated enum ModelLoader {
         } else if let declaredUnit {
             unit = declaredUnit
             isDeclared = format == .step || format == .glb || format == .gltf
+        } else if isSplat {
+            unit = .meter
+            isDeclared = false
         } else {
             unit = options.unitlessUnit
             isDeclared = false

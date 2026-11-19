@@ -54,6 +54,17 @@ final class AppSettings {
     var quality: TessellationQuality { didSet { defaults.set(quality.rawValue, forKey: "quality") } }
     var appearance: AppearanceMode { didSet { defaults.set(appearance.rawValue, forKey: "appearance") } }
     var lastExportFormat: ExportFormat { didSet { defaults.set(lastExportFormat.rawValue, forKey: "lastExportFormat") } }
+    /// Distance between the VR headset's lens centres (mm); also the virtual eye separation.
+    var vrLensSpacing: Double { didSet { defaults.set(vrLensSpacing, forKey: "vrLensSpacing") } }
+    /// Pre-distort the split-screen image for the headset's magnifying lenses.
+    var vrDistortion: Bool { didSet { defaults.set(vrDistortion, forKey: "vrDistortion") } }
+
+    var headsetProfile: HeadsetProfile {
+        var p = HeadsetProfile()
+        p.lensSpacing = Float(vrLensSpacing)
+        p.correctsDistortion = vrDistortion
+        return p
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -67,5 +78,7 @@ final class AppSettings {
         quality = TessellationQuality(rawValue: defaults.string(forKey: "quality") ?? "") ?? .standard
         appearance = AppearanceMode(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .paper
         lastExportFormat = ExportFormat(rawValue: defaults.string(forKey: "lastExportFormat") ?? "") ?? .stlBinary
+        vrLensSpacing = defaults.object(forKey: "vrLensSpacing") as? Double ?? 63.5
+        vrDistortion = defaults.object(forKey: "vrDistortion") as? Bool ?? true
     }
 }

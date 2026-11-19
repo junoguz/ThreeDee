@@ -9,6 +9,7 @@ import SwiftUI
 
 @main
 struct ThreeDeeApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var settings = AppSettings()
     @State private var store = LibraryStore()
 

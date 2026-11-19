@@ -51,10 +51,14 @@ struct OrbitCamera {
                              SIMD4(-simd_dot(r, e), -simd_dot(u, e), -simd_dot(b, e), 1))
     }
 
-    func projectionMatrix(aspect: Float) -> simd_float4x4 {
+    /// Near and far planes bracketing the content.
+    var depthRange: (near: Float, far: Float) {
         let d = effectiveDistance
-        let near = max(d - sceneRadius * 3, d * 0.002, 1e-4)
-        let far = d + sceneRadius * 6
+        return (max(d - sceneRadius * 3, d * 0.002, 1e-4), d + sceneRadius * 6)
+    }
+
+    func projectionMatrix(aspect: Float) -> simd_float4x4 {
+        let (near, far) = depthRange
         let y = 1 / tan(fieldOfView / 2)
         let x = y / max(aspect, 1e-4)
         let z = far / (near - far)

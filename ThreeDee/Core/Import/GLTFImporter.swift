@@ -44,8 +44,27 @@ nonisolated struct GLTFDocument: Codable, Sendable {
         var target: Int?
     }
     struct Buffer: Codable, Sendable { var uri: String?; var byteLength: Int }
-    struct PBR: Codable, Sendable { var baseColorFactor: [Float]? }
-    struct Material: Codable, Sendable { var pbrMetallicRoughness: PBR?; var name: String? }
+    struct TextureInfo: Codable, Sendable { var index: Int; var texCoord: Int? }
+    struct PBR: Codable, Sendable { var baseColorFactor: [Float]?; var baseColorTexture: TextureInfo? }
+    struct EmissiveStrength: Codable, Sendable { var emissiveStrength: Float? }
+    struct Empty: Codable, Sendable {}
+    struct MaterialExtensions: Codable, Sendable {
+        var KHR_materials_emissive_strength: EmissiveStrength?
+        var KHR_materials_unlit: Empty?
+    }
+    struct Material: Codable, Sendable {
+        var pbrMetallicRoughness: PBR?
+        var name: String?
+        var emissiveFactor: [Float]?
+        var emissiveTexture: TextureInfo?
+        var alphaMode: String?
+        var alphaCutoff: Float?
+        var extensions: MaterialExtensions?
+    }
+    struct SourceRef: Codable, Sendable { var source: Int? }
+    struct TextureExtensions: Codable, Sendable { var EXT_texture_webp: SourceRef? }
+    struct Texture: Codable, Sendable { var source: Int?; var extensions: TextureExtensions? }
+    struct Image: Codable, Sendable { var uri: String?; var bufferView: Int?; var mimeType: String?; var name: String? }
     struct Asset: Codable, Sendable { var version: String; var generator: String? }
 
     var asset: Asset
@@ -57,6 +76,8 @@ nonisolated struct GLTFDocument: Codable, Sendable {
     var bufferViews: [BufferView]?
     var buffers: [Buffer]?
     var materials: [Material]?
+    var textures: [Texture]?
+    var images: [Image]?
     var extensionsRequired: [String]?
 }
 
@@ -206,9 +227,54 @@ nonisolated enum GLTFImporter {
             return result
         }
 
+        // Materials and the images they use. glTF factors are linear; the app keeps sRGB-encoded colours.
+        var textures: [MeshTexture] = []
+        var textureForImage: [Int: Int] = [:]
+        func meshTexture(_ info: GLTFDocument.TextureInfo?) -> Int? {
+            guard let info, let tex = doc.textures?[safe: info.index],
+                  let imageIndex = tex.source ?? tex.extensions?.EXT_texture_webp?.source else { return nil }
+            if let existing = textureForImage[imageIndex] { return existing }
+            guard let image = doc.images?[safe: imageIndex] else { return nil }
+            var bytes: Data?
+            if let viewIndex = image.bufferView, let view = doc.bufferViews?[safe: viewIndex], let buffer = buffers[safe: view.buffer] {
+                let start = view.byteOffset ?? 0
+                if start + view.byteLength <= buffer.count { bytes = buffer.subdata(in: start..<(start + view.byteLength)) }
+            } else if let uri = image.uri {
+                if uri.hasPrefix("data:"), let comma = uri.firstIndex(of: ",") {
+                    bytes = Data(base64Encoded: String(uri[uri.index(after: comma)...]))
+                } else if let baseURL, let decoded = uri.removingPercentEncoding {
+                    bytes = try? Data(contentsOf: baseURL.deletingLastPathComponent().appendingPathComponent(decoded))
+                }
+            }
+            guard let bytes, !bytes.isEmpty else { return nil }
+            textures.append(MeshTexture(name: image.name ?? image.uri ?? "image \(imageIndex)", source: .encoded(bytes)))
+            textureForImage[imageIndex] = textures.count - 1
+            return textures.count - 1
+        }
+        let docMaterials = doc.materials ?? []
+        var materials: [MeshMaterial] = docMaterials.map { m in
+            var out = MeshMaterial(name: m.name ?? "")
+            out.baseColorTexture = meshTexture(m.pbrMetallicRoughness?.baseColorTexture)
+            let strength = m.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1
+            if let e = m.emissiveFactor, e.count >= 3 {
+                out.emissive = SIMD3(GLTFImporter.srgb(e[0] * strength), GLTFImporter.srgb(e[1] * strength), GLTFImporter.srgb(e[2] * strength))
+                if out.emissive != .zero { out.emissiveTexture = meshTexture(m.emissiveTexture) }
+            }
+            out.unlit = m.extensions?.KHR_materials_unlit != nil
+            switch m.alphaMode {
+            case "MASK": out.alphaCutoff = m.alphaCutoff ?? 0.5
+            // Blending isn't sorted here; only cut fully clear texels so glass stays visible.
+            case "BLEND": out.alphaCutoff = 0.05
+            default: break
+            }
+            return out
+        }
+        var defaultMaterial: UInt16?
+        var triangleMaterials: [UInt16] = []
+
         var triangles = Mesh()
         var points = Mesh()
-        var anyColor = false
+        var anyColor = !textures.isEmpty
 
         func emit(meshIndex: Int, transform: simd_float4x4) throws {
             guard let def = doc.meshes?[safe: meshIndex] else { return }
@@ -222,14 +288,25 @@ nonisolated enum GLTFImporter {
                 if let ni = prim.attributes["NORMAL"], let (n, _) = try? readFloats(ni), n.count == count * 3 {
                     part.normals = (0..<count).map { SIMD3(n[$0 * 3], n[$0 * 3 + 1], n[$0 * 3 + 2]) }
                 }
+                let material = prim.material.flatMap { docMaterials[safe: $0] }
+                let uvSet = material?.pbrMetallicRoughness?.baseColorTexture?.texCoord ?? 0
+                if let ti = prim.attributes["TEXCOORD_\(uvSet)"] ?? prim.attributes["TEXCOORD_0"],
+                   let (uv, nc) = try? readFloats(ti), nc == 2, uv.count == count * 2 {
+                    part.texCoords = (0..<count).map { SIMD2(uv[$0 * 2], uv[$0 * 2 + 1]) }
+                }
+                // Vertex colour × base colour factor (both linear in glTF), stored sRGB-encoded.
+                var factor = SIMD4<Float>(1, 1, 1, 1)
+                if let f = material?.pbrMetallicRoughness?.baseColorFactor, f.count >= 3 {
+                    factor = SIMD4(f[0], f[1], f[2], f.count >= 4 ? f[3] : 1)
+                }
                 if let ci = prim.attributes["COLOR_0"], let (c, nc) = try? readFloats(ci), c.count == count * nc {
                     part.colors = (0..<count).map {
-                        RGBA8(unit: Double(c[$0 * nc]), Double(c[$0 * nc + 1]), Double(c[$0 * nc + 2]),
-                              nc == 4 ? Double(c[$0 * nc + 3]) : 1)
+                        GLTFImporter.color(SIMD4(c[$0 * nc], c[$0 * nc + 1], c[$0 * nc + 2], nc == 4 ? c[$0 * nc + 3] : 1) * factor)
                     }
                     anyColor = true
-                } else if let mi = prim.material, let f = doc.materials?[safe: mi]?.pbrMetallicRoughness?.baseColorFactor, f.count >= 3 {
-                    let color = RGBA8(unit: Double(f[0]), Double(f[1]), Double(f[2]))
+                } else {
+                    // glTF's default material is white; fill explicitly so merged parts never fall back to grey.
+                    let color = GLTFImporter.color(factor)
                     if color != .white { anyColor = true }
                     part.colors = [RGBA8](repeating: color, count: count)
                 }
@@ -256,6 +333,17 @@ nonisolated enum GLTFImporter {
                     part.indices = idx
                     part.apply(transform)
                     triangles.append(part)
+                    var slot: UInt16
+                    if let mi = prim.material, mi >= 0, mi < materials.count {
+                        slot = UInt16(mi)
+                    } else {
+                        if defaultMaterial == nil {
+                            materials.append(MeshMaterial())
+                            defaultMaterial = UInt16(materials.count - 1)
+                        }
+                        slot = defaultMaterial!
+                    }
+                    triangleMaterials += [UInt16](repeating: slot, count: part.triangleCount)
                 }
             }
         }
@@ -278,10 +366,26 @@ nonisolated enum GLTFImporter {
         }
 
         var result = triangles.isEmpty ? points : triangles
+        if !triangles.isEmpty && triangleMaterials.count == triangles.triangleCount && materials.contains(where: { !$0.isPlain }) {
+            result.materials = materials
+            result.textures = textures
+            result.triangleMaterials = triangleMaterials
+        }
         if !anyColor { result.colors = [] }
+        if !result.hasTextures { result.texCoords = [] }
         guard !result.isEmpty else { throw ImportError.empty }
         result.sanitize()
         return result
+    }
+
+    /// Linear → sRGB transfer (glTF stores linear factors; the app works in sRGB like most files).
+    static func srgb(_ x: Float) -> Float {
+        let v = min(max(x, 0), 1)
+        return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055
+    }
+
+    static func color(_ linear: SIMD4<Float>) -> RGBA8 {
+        RGBA8(unit: Double(srgb(linear.x)), Double(srgb(linear.y)), Double(srgb(linear.z)), Double(min(max(linear.w, 0), 1)))
     }
 }
 
