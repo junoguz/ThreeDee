@@ -1,6 +1,6 @@
 # ThreeDee
 
-ThreeDee is an Internal iOS tool for opening, inspecting, converting and exporting 3D files. CAD parts, scans and meshes are shown at true metric scale in a technical-drawing style.
+ThreeDee is an Internal iOS tool for opening, inspecting, converting and exporting 3D files. CAD parts, scans and meshes are shown at true metric scale in a technical-drawing style. It features Video Game-like immersion Modes such as Joystick-Exploration as well as VR Immersion via external Smartphone VR Headsets.
 
 ## Features
 
